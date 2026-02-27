@@ -1,0 +1,54 @@
+Task 6 — Code Review: Infinite Loop Bug in useEffect
+
+1. What is the Bug
+The following code creates an infinite loop.
+
+useEffect(() => {
+  fetchActivities().then(setActivities);
+}, [activities]);
+
+When the component mounts, useEffect fires and calls fetchActivities. When fetchActivities resolves, setActivities is called which updates the activities state with a new array reference. Since activities is in the dependency array, useEffect detects a change and fires again. This calls fetchActivities again, which again calls setActivities, which again triggers the effect. This keeps repeating forever in an infinite loop.
+
+The root cause is that setActivities creates a new array reference every time, even if the data is the same. React uses referential equality (===) to compare dependencies, not deep equality. So every fetch creates a new array, which triggers useEffect, which fetches again.
+
+
+2. Production Impact
+This bug causes thousands of API requests per second to the backend, which can DDoS your own server. The browser freezes because of continuous re-renders on the main thread. Memory leaks happen because each fetch creates new array objects that pile up. MongoDB connection pool gets exhausted from rapid fire queries. Other users experience degraded performance due to resource starvation. The browser tab becomes unresponsive and may crash.
+
+
+3. The Fix
+
+Option A: Remove activities from dependencies (Recommended)
+
+useEffect(() => {
+  fetchActivities().then(setActivities);
+}, []);
+
+This runs only once on component mount. There is no reason for the fetch to re-run when activities changes.
+
+Option B: Use a loading flag to prevent re-fetching
+
+const [loaded, setLoaded] = useState(false);
+
+useEffect(() => {
+  if (!loaded) {
+    fetchActivities().then((data) => {
+      setActivities(data);
+      setLoaded(true);
+    });
+  }
+}, [loaded]);
+
+Option C: Use useRef to track if fetch has already been done
+
+const hasFetched = useRef(false);
+
+useEffect(() => {
+  if (hasFetched.current) return;
+  hasFetched.current = true;
+  fetchActivities().then(setActivities);
+}, []);
+
+
+4. Prevention Strategy
+Use eslint-plugin-react-hooks with the exhaustive-deps rule to catch incorrect dependencies. During code review, always check if a useEffect modifies any of its own dependencies, if yes that is a potential infinite loop and needs refactoring. Check if the dependency is a non-primitive like object or array, if yes consider useMemo or useRef to stabilize the reference. Separate fetch effects from react-to-data effects so fetching logic does not depend on the data it fetches. Write tests that detect infinite re-renders by counting render calls. Use custom hooks to encapsulate data fetching logic. Consider React Query or TanStack Query for production apps as it handles caching, deduplication, and refetching automatically.

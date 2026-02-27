@@ -1,0 +1,36 @@
+Task 2 — Performance Debugging: MongoDB Pagination
+
+1. Why `skip()` is Slow in MongoDB
+skip() is slow in MongoDB because the database still has to read the previous documents before returning the results. For example, if you use skip(10000), MongoDB will first scan those 10,000 documents and ignore them, then return the next records. It does not directly jump to the 10,001st document.
+
+
+db.activities
+  .find({ tenantId: "tenant-001" })
+  .sort({ createdAt: -1 })
+  .skip(100000)   // ← THIS IS THE BOTTLENECK
+  .limit(20);
+
+  
+
+2. Rewritten Query with Cursor-Based Pagination
+In cursor based pagination, we use the last document id from previous result and fetch next records after that id. This way MongoDB directly continues from the last position using index, so it works faster and is more efficient for big collections.
+it have O(log N) time complexity
+db.users.find({ _id: { $gt: lastSeenId } })
+        .sort({ _id: 1 })
+        .limit(10)
+
+        
+
+3. Correct Index Definition
+without proper index MongoDB has to scan many documents and it becomes slow. If you are filtering or sorting by a field, that field should have an index. For example, if you are sorting by createdAt, then you should create an index on createdAt. If you are filtering by status and sorting by createdAt, then a compound index on both fields is better. The order of fields in compound index should match the query
+
+## 4. Metrics to Monitor
+
+• Check totalDocsExamined should be close to limit, not very high
+• Monitor executionTimeMillis, keep query time low
+• Ensure winningPlan stage is IXSCAN, not COLLSCAN
+• Compare keysExamined and docsReturned, ratio should be near 1:1
+• Track query rate using opcounters.query
+• Monitor memory usage, working set should fit in RAM
+• Enable slow query log to catch queries above 100ms
+• Watch connection pool usage to avoid exhaustion under load

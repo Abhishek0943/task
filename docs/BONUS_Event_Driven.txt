@@ -1,0 +1,75 @@
+Bonus — Event-Driven Architecture: Async Activity Processing
+
+1. Current Architecture (Synchronous)
+Currently the flow is Client sends POST /activities to Express Handler which writes to MongoDB and then sends the response back. The problem at scale is that API response time is coupled to database write latency. If MongoDB is slow, the client waits. High write throughput can overwhelm the database. There is no retry mechanism if the write fails. There is tight coupling between API and persistence.
+
+
+2. Redesigned Architecture (Event-Driven)
+In the event-driven approach, when the client sends POST /activities, the API server validates the input and enqueues the activity to a message queue like Kafka, SQS, RabbitMQ or BullMQ. The server immediately returns 202 Accepted. A separate worker process picks up the job from the queue, validates it, enriches metadata, writes to MongoDB, broadcasts via SSE, and updates analytics. This decouples the API from the database write.
+
+router.post('/activities', tenantIsolation, async (req, res) => {
+  const { actorId, actorName, type, entityId, metadata } = req.body;
+
+  if (!actorId || !actorName || !type) {
+    return res.status(400).json({ success: false, error: 'Missing required fields' });
+  }
+
+  const idempotencyKey = req.headers['x-idempotency-key'] ||
+    `${req.tenantId}-${actorId}-${type}-${Date.now()}`;
+
+  await activityQueue.add('create-activity', {
+    tenantId: req.tenantId, actorId, actorName, type, entityId, metadata, idempotencyKey,
+    enqueuedAt: new Date().toISOString(),
+  }, {
+    jobId: idempotencyKey,
+    attempts: 3,
+    backoff: { type: 'exponential', delay: 1000 },
+  });
+
+  return res.status(202).json({ success: true, message: 'Activity queued for processing', idempotencyKey });
+});
+
+
+3. Worker (Consumer)
+The worker picks jobs from the queue. It first checks idempotency by looking up the key in Redis. If already processed, it skips. Otherwise it writes to MongoDB, marks the key in Redis with a 24 hour TTL, broadcasts to connected clients via Redis Pub/Sub, and updates analytics counters. The worker runs with concurrency of 10 jobs per worker instance.
+
+const worker = new Worker('activity-processing', async (job) => {
+  const { tenantId, actorId, actorName, type, entityId, metadata, idempotencyKey } = job.data;
+
+  const alreadyProcessed = await redis.get(`idempotency:${idempotencyKey}`);
+  if (alreadyProcessed) return { skipped: true, reason: 'duplicate' };
+
+  const activity = await Activity.create({
+    tenantId, actorId, actorName, type, entityId, metadata: metadata || {}, createdAt: new Date(),
+  });
+
+  await redis.set(`idempotency:${idempotencyKey}`, activity._id.toString(), 'EX', 86400);
+  await redis.publish('new-activity', JSON.stringify(activity));
+  await redis.hincrby(`analytics:${tenantId}`, type, 1);
+
+  return { success: true, activityId: activity._id };
+}, { connection: redis, concurrency: 10 });
+
+
+4. Idempotency
+An operation is idempotent if performing it multiple times produces the same result as performing it once. This is critical in distributed systems where messages can be delivered more than once. Without idempotency, if the client retries a request due to network timeout, the worker would write a duplicate activity to the database.
+
+Our idempotency strategy has three layers. First, the client can provide an x-idempotency-key header. Second, BullMQ uses jobId to prevent duplicate jobs, if a job with the same id already exists it is silently ignored. Third, the worker checks Redis before writing, if the key exists it skips processing. Keys expire after 24 hours to prevent unbounded growth.
+
+
+5. Failure Handling
+If the API server crashes before enqueue, the client retries with the same idempotency key. If the queue goes down, the queue persistence layer handles it, Kafka uses disk, SQS uses replication, Redis uses AOF. If the worker crashes mid processing, the job visibility timeout causes it to be re-delivered to another worker. If the MongoDB write fails, BullMQ retries with exponential backoff up to 3 attempts (1 second, 2 seconds, 4 seconds). If Redis fails for idempotency, a circuit breaker falls back to try-write and catch duplicate error. If all retries are exhausted, the job moves to a Dead Letter Queue for manual review.
+
+worker.on('failed', async (job, error) => {
+  if (job.attemptsMade >= job.opts.attempts) {
+    await dlqQueue.add('failed-activity', {
+      ...job.data, error: error.message, failedAt: new Date().toISOString(), attempts: job.attemptsMade,
+    });
+  }
+});
+
+
+6. Recommended Tools
+For message queue use BullMQ (Redis-based) for less than 100K messages per second, Apache Kafka for more than 100K messages per second or multi-datacenter, or AWS SQS for managed zero-ops. For cache and idempotency use Redis for sub-ms reads with TTL support and Pub/Sub. For worker framework use BullMQ Worker with built-in retries and concurrency. For monitoring use Bull Board for queue inspection UI. For alerting use PagerDuty or Slack to notify on DLQ items.
+
+Synchronous response time is 50-200ms (DB dependent), event-driven is less than 10ms (enqueue only). Synchronous write throughput is around 1K per second, event-driven is 50K+ per second with queue buffering. Synchronous has no failure recovery, event-driven has auto-retry plus DLQ. Synchronous scales vertically only, event-driven scales horizontally by adding workers.

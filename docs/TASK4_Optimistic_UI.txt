@@ -1,0 +1,47 @@
+Task 4 — Optimistic UI Update
+
+1. What is Optimistic UI
+Optimistic UI means we update the interface immediately before the server confirms the action. Instead of showing a loading spinner and waiting for the API response, we assume the operation will succeed and show the result instantly. If the server call fails, we rollback and remove the item from the UI.
+
+Traditional approach: User clicks Create → Loading spinner → API responds → Activity appears
+Optimistic approach: User clicks Create → Activity appears instantly → API confirms in background
+
+
+2. How It Works in Our Code
+When user submits the form, we generate a temporary id like temp-1740500000-abc123 and add the activity to the top of the feed immediately with reduced opacity and a sending label. Then we send the POST request to the server. If the server responds with success, we replace the temp activity with the real server data. If the server returns an error, we rollback by removing the temp activity from the feed.
+
+const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+const tempActivity = {
+  _id: tempId,
+  tenantId: "tenant-001",
+  actorId: formData.actorId,
+  actorName: formData.actorName,
+  type: formData.type,
+  createdAt: new Date().toISOString(),
+};
+
+const rollback = addOptimisticActivity(tempActivity);
+
+try {
+  const result = await createActivity(data);
+  replaceOptimisticActivity(tempId, result.data);
+} catch (err) {
+  rollback();
+  setError(err.message);
+}
+
+
+3. Rollback Logic
+The addOptimisticActivity function adds the temp activity to the activities array and returns a rollback function. The rollback function removes the temp activity by filtering it out using its temp id. This way on failure, the feed goes back to its previous state as if the user never clicked create.
+
+addOptimisticActivity adds temp to array → returns rollback function
+On success → replaceOptimisticActivity swaps temp with real server data
+On failure → rollback() removes temp from array
+
+
+4. Visual Feedback
+We detect optimistic items by checking if the id starts with temp-. If it does, we show the activity with lower opacity (0.7) and a sending... label so the user knows it is still being processed. Once the server confirms, opacity goes to 1 and the label is removed.
+
+const isOptimistic = activity._id?.startsWith("temp-");
+opacity: isOptimistic ? 0.7 : 1
+{isOptimistic && <span>sending...</span>}
