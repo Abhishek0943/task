@@ -1,0 +1,17 @@
+Task 5 — System Design: Scaling to 50M+ Activities Per Tenant
+
+To scale to 50M activities per tenant, keep every document keyed by tenantId and createdAt. All reads should always be tenant scoped and time sorted. Use a compound index like { tenantId: 1, createdAt: -1 } and paginate with a cursor using the last seen timestamp or id, not skip(), so MongoDB does not scan and discard millions of rows.
+
+For sharding, avoid a shard key that creates hot shards. Use tenantId plus a time bucket like month or week so writes are distributed and shards do not become jumbo. This helps balance data growth and prevents one shard from handling all recent inserts.
+
+If one tenant becomes too heavy, isolate it by moving it to dedicated shards or even a separate cluster. Apply rate limiting on writes so a single tenant cannot affect the performance of others.
+
+Keep the hot collection small with a clear retention policy. Store only recent activity in the main collection and archive older data. Use a TTL index if automatic deletion is acceptable.
+
+For real time delivery, use SSE for simple one way activity feeds. Use WebSocket only if two way interaction is required. Always push events through a queue instead of querying MongoDB for every update, so the system remains scalable.
+db.activities.createIndex({ tenantId: 1, createdAt: -1 })
+db.activities.find({ tenantId: "t1", createdAt: { $lt: lastSeen } })
+  .sort({ createdAt: -1 })
+  .limit(50)
+db.activities.createIndex({ createdAt: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 90 })
+
